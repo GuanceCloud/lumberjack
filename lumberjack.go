@@ -3,7 +3,7 @@
 // Note that this is v2.0 of lumberjack, and should be imported using gopkg.in
 // thusly:
 //
-//   import "gopkg.in/natefinch/lumberjack.v2"
+//	import "gopkg.in/natefinch/lumberjack.v2"
 //
 // The package name remains simply lumberjack, and the code resides at
 // https://github.com/natefinch/lumberjack under the v2.0 branch.
@@ -36,9 +36,10 @@ import (
 )
 
 const (
-	backupTimeFormat = "2006-01-02T15-04-05.000"
-	compressSuffix   = ".gz"
-	defaultMaxSize   = 100
+	backupTimeFormat       = "2006-01-02T15-04-05.000"
+	compressSuffix         = ".gz"
+	defaultMaxSize         = 100
+	defaultCompressWorkers = 6
 )
 
 // ensure we always implement io.WriteCloser
@@ -66,7 +67,7 @@ var _ io.WriteCloser = (*Logger)(nil)
 // `/var/log/foo/server.log`, a backup created at 6:30pm on Nov 11 2016 would
 // use the filename `/var/log/foo/server-2016-11-04T18-30-00.000.log`
 //
-// Cleaning Up Old Log Files
+// # Cleaning Up Old Log Files
 //
 // Whenever a new logfile gets created, old log files may be deleted.  The most
 // recent files according to the encoded timestamp will be retained, up to a
@@ -107,6 +108,12 @@ type Logger struct {
 	// using gzip. The default is not to perform compression.
 	Compress bool `json:"compress" yaml:"compress"`
 
+	// CompressWorkers is the maximum number of backup files to compress
+	// concurrently per Logger. Values less than or equal to 0 use the default
+	// of 6. It is only used when Compress is true. Each file is compressed by
+	// one worker; fewer workers are started when there are fewer files.
+	CompressWorkers int `json:"compressworkers" yaml:"compressworkers"`
+
 	size int64
 	file *os.File
 	mu   sync.Mutex
@@ -127,6 +134,19 @@ var (
 	// to disk.
 	megabyte = 1024 * 1024
 )
+
+// Start starts background log maintenance, if necessary, and requests a scan
+// for backup files to remove or compress according to the Logger configuration.
+// It returns without waiting for the scan or compression to finish and does not
+// open, create, or rotate the current logfile.
+//
+// Start is safe to call repeatedly or concurrently with Write, Rotate, or other
+// Start calls. Pending scan requests may be combined; scans never overlap for
+// the same Logger. It does not schedule periodic scans. Configure the Logger
+// before calling Start or using it for logging.
+func (l *Logger) Start() {
+	l.mill()
+}
 
 // Write implements io.Writer.  If a write would cause the log file to be larger
 // than MaxSize, the file is closed, renamed to include a timestamp of the
@@ -362,15 +382,55 @@ func (l *Logger) millRunOnce() error {
 			err = errRemove
 		}
 	}
-	for _, f := range compress {
-		fn := filepath.Join(l.dir(), f.Name())
-		errCompress := compressLogFile(fn, fn+compressSuffix)
-		if err == nil && errCompress != nil {
-			err = errCompress
-		}
+	if errCompress := l.compressLogFiles(compress, compressLogFile); err == nil {
+		err = errCompress
 	}
 
 	return err
+}
+
+// compressLogFiles runs a bounded worker pool for this cleanup batch. It waits
+// for every file before returning so the next batch cannot remove or recompress
+// files that are still being processed.
+func (l *Logger) compressLogFiles(files []logInfo, compress func(string, string) error) error {
+	if len(files) == 0 {
+		return nil
+	}
+	workers := l.CompressWorkers
+	if workers <= 0 {
+		workers = defaultCompressWorkers
+	}
+	if workers > len(files) {
+		workers = len(files)
+	}
+
+	dir := l.dir()
+	jobs := make(chan int)
+	errs := make([]error, len(files))
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				fn := filepath.Join(dir, files[index].Name())
+				errs[index] = compress(fn, fn+compressSuffix)
+			}
+		}()
+	}
+	for index := range files {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+
+	// Keep the original error ordering even when files finish out of order.
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // millRun runs in a goroutine to manage post-rotation compression and removal

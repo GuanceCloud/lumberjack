@@ -693,7 +693,8 @@ func TestJson(t *testing.T) {
 	"maxage": 10,
 	"maxbackups": 3,
 	"localtime": true,
-	"compress": true
+	"compress": true,
+	"compressworkers": 3
 }`[1:])
 
 	l := Logger{}
@@ -705,6 +706,7 @@ func TestJson(t *testing.T) {
 	equals(3, l.MaxBackups, t)
 	equals(true, l.LocalTime, t)
 	equals(true, l.Compress, t)
+	equals(3, l.CompressWorkers, t)
 }
 
 // makeTempDir creates a file with a semi-unique name in the OS temp directory.

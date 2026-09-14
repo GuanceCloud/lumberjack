@@ -75,6 +75,12 @@ type Logger struct {
     // Compress determines if the rotated log files should be compressed
     // using gzip. The default is not to perform compression.
     Compress bool `json:"compress" yaml:"compress"`
+
+    // CompressWorkers is the maximum number of backup files to compress
+    // concurrently per Logger. Values less than or equal to 0 use the default
+    // of 6. It is only used when Compress is true. Each file is compressed by
+    // one worker; fewer workers are started when there are fewer files.
+    CompressWorkers int `json:"compressworkers" yaml:"compressworkers"`
     // contains filtered or unexported fields
 }
 ```
@@ -110,6 +116,16 @@ time, which may differ from the last time that file was written to.
 
 If MaxBackups and MaxAge are both 0, no old log files will be deleted.
 
+When `Compress` is true, each Logger compresses backup files in a background
+worker pool with up to 6 workers by default. Set `CompressWorkers` to a positive
+number to change the limit, or to 1 for serial compression. A single file is
+handled by one worker; concurrency is across files. Workers are started for each
+cleanup batch as needed and exit when the batch finishes. Cleanup batches do not
+overlap, and logging does not wait for compression to finish.
+
+Call `Start()` after configuring a Logger to scan existing backups immediately,
+even before the first log write. The scan applies `MaxAge`, `MaxBackups`, and
+`Compress` just like the cleanup triggered by writing or rotating logs.
 
 
 
@@ -119,6 +135,30 @@ If MaxBackups and MaxAge are both 0, no old log files will be deleted.
 
 
 
+
+### func (\*Logger) Start
+
+```go
+func (l *Logger) Start()
+```
+
+Start initializes background maintenance if necessary and requests a backup
+scan. It returns without waiting for cleanup or compression and does not open,
+create, or rotate the current logfile. Configure the Logger before calling it.
+Repeated or concurrent calls are safe; pending requests may be combined, and
+scans for one Logger never overlap. Start does not schedule periodic scans.
+Background errors are handled the same way as cleanup triggered by Write or
+Rotate; they are not returned by Start. Close still only closes the current
+logfile and does not stop or wait for background maintenance.
+
+```go
+l := &lumberjack.Logger{
+    Filename: "/var/log/myapp/foo.log",
+    Compress: true, // uses up to 6 compression workers by default
+}
+l.Start()
+log.SetOutput(l)
+```
 
 ### func (\*Logger) Close
 ``` go
